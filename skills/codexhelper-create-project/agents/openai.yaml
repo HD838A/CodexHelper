@@ -1,0 +1,4 @@
+interface:
+  display_name: "CodexHelper Project Creator"
+  short_description: "Create Codex-ready empty projects"
+  default_prompt: "Use $codexhelper-create-project to create a new project named PhotoTools."
