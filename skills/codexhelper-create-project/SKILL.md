@@ -26,7 +26,7 @@ codex-helper new <project-name>
 cargo run -- new <project-name>
 ```
 
-6. Report the created project path and the generated files: `.gitignore`, `README.md`, and `AGENTS.md`.
+6. Report the created project path and the generated files: `.gitignore`, `README.md`, `AGENTS.md`, and `.codex/environments/environment.toml`.
 
 ## Boundaries
 

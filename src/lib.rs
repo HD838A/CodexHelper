@@ -4,6 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod templates;
+
 #[derive(Debug, Clone)]
 pub struct CreateProjectOptions {
     pub current_dir: PathBuf,
@@ -22,6 +24,10 @@ pub enum CodexHelperError {
     TargetAlreadyExists(PathBuf),
     Io(std::io::Error),
     GitInitFailed(String),
+    CleanupFailed {
+        original: Box<CodexHelperError>,
+        cleanup: std::io::Error,
+    },
 }
 
 impl fmt::Display for CodexHelperError {
@@ -36,6 +42,12 @@ impl fmt::Display for CodexHelperError {
             }
             Self::Io(error) => write!(f, "{error}"),
             Self::GitInitFailed(message) => write!(f, "git init failed: {message}"),
+            Self::CleanupFailed { original, cleanup } => {
+                write!(
+                    f,
+                    "{original}; additionally failed to clean up the new project directory: {cleanup}"
+                )
+            }
         }
     }
 }
@@ -44,6 +56,7 @@ impl Error for CodexHelperError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
+            Self::CleanupFailed { cleanup, .. } => Some(cleanup),
             _ => None,
         }
     }
@@ -101,6 +114,13 @@ pub fn default_target_parent(current_dir: &Path) -> Result<PathBuf> {
 }
 
 pub fn create_project(options: CreateProjectOptions) -> Result<CreatedProject> {
+    create_project_with_git(options, "git")
+}
+
+fn create_project_with_git(
+    options: CreateProjectOptions,
+    git_program: &str,
+) -> Result<CreatedProject> {
     validate_project_name(&options.project_name)?;
 
     let parent = default_target_parent(&options.current_dir)?;
@@ -112,10 +132,23 @@ pub fn create_project(options: CreateProjectOptions) -> Result<CreatedProject> {
     }
 
     fs::create_dir(&target)?;
-    write_project_files(&target, &options.project_name)?;
-    init_git_repo(&target)?;
+    if let Err(error) = write_project_files(&target, &options.project_name)
+        .and_then(|_| init_git_repo(&target, git_program))
+    {
+        return Err(cleanup_created_project(&target, error));
+    }
 
     Ok(CreatedProject { path: target })
+}
+
+fn cleanup_created_project(target: &Path, error: CodexHelperError) -> CodexHelperError {
+    match fs::remove_dir_all(target) {
+        Ok(()) => error,
+        Err(cleanup) => CodexHelperError::CleanupFailed {
+            original: Box::new(error),
+            cleanup,
+        },
+    }
 }
 
 fn ensure_target_inside_parent(parent: &Path, target: &Path) -> Result<()> {
@@ -135,14 +168,31 @@ fn ensure_target_inside_parent(parent: &Path, target: &Path) -> Result<()> {
 }
 
 fn write_project_files(project_dir: &Path, project_name: &str) -> Result<()> {
-    fs::write(project_dir.join("README.md"), readme_contents(project_name))?;
-    fs::write(project_dir.join(".gitignore"), gitignore_contents())?;
-    fs::write(project_dir.join("AGENTS.md"), agents_contents(project_name))?;
+    fs::write(
+        project_dir.join("README.md"),
+        templates::readme_contents(project_name),
+    )?;
+    fs::write(
+        project_dir.join(".gitignore"),
+        templates::gitignore_contents(),
+    )?;
+    fs::write(
+        project_dir.join("AGENTS.md"),
+        templates::agents_contents(project_name),
+    )?;
+
+    let environment_dir = project_dir.join(".codex/environments");
+    fs::create_dir_all(&environment_dir)?;
+    fs::write(
+        environment_dir.join("environment.toml"),
+        templates::environment_contents(),
+    )?;
+
     Ok(())
 }
 
-fn init_git_repo(project_dir: &Path) -> Result<()> {
-    let output = Command::new("git")
+fn init_git_repo(project_dir: &Path, git_program: &str) -> Result<()> {
+    let output = Command::new(git_program)
         .arg("init")
         .current_dir(project_dir)
         .output()?;
@@ -158,34 +208,27 @@ fn init_git_repo(project_dir: &Path) -> Result<()> {
     Err(CodexHelperError::GitInitFailed(message))
 }
 
-fn readme_contents(project_name: &str) -> String {
-    format!("# {project_name}\n\nProject description goes here.\n")
-}
+#[cfg(test)]
+mod tests {
+    use super::{create_project_with_git, CreateProjectOptions};
+    use std::fs;
+    use tempfile::tempdir;
 
-fn gitignore_contents() -> &'static str {
-    ".DS_Store\n\
-     .idea/\n\
-     .vscode/\n\
-     *.log\n\
-     .env\n\
-     .env.*\n\
-     !.env.example\n\
-     tmp/\n\
-     temp/\n\
-     cache/\n\
-     .cache/\n\
-     build/\n\
-     dist/\n\
-     target/\n"
-}
+    #[test]
+    fn removes_created_directory_when_git_init_cannot_start() {
+        let workspace = tempdir().unwrap();
+        let helper_dir = workspace.path().join("CodexHelper");
+        fs::create_dir(&helper_dir).unwrap();
 
-fn agents_contents(project_name: &str) -> String {
-    format!(
-        "# AGENTS.md instructions for {project_name}\n\n\
-         - Read the existing files before making changes.\n\
-         - Keep edits focused on the user's request.\n\
-         - Preserve user changes and do not revert unrelated work.\n\
-         - Avoid destructive commands unless the user explicitly asks for them.\n\
-         - Verify the result when practical, and report anything that could not be verified.\n"
-    )
+        let result = create_project_with_git(
+            CreateProjectOptions {
+                current_dir: helper_dir,
+                project_name: "BrokenProject".to_string(),
+            },
+            "codex-helper-missing-git-binary",
+        );
+
+        assert!(result.is_err());
+        assert!(!workspace.path().join("BrokenProject").exists());
+    }
 }

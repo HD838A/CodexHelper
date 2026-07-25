@@ -58,8 +58,13 @@ fn creates_empty_project_with_common_files_and_git_repo() {
     assert!(project_dir.join(".gitignore").is_file());
     assert!(project_dir.join("README.md").is_file());
     assert!(project_dir.join("AGENTS.md").is_file());
+    assert!(project_dir
+        .join(".codex/environments/environment.toml")
+        .is_file());
 
     let agents = fs::read_to_string(project_dir.join("AGENTS.md")).unwrap();
+    assert!(agents.contains(".codex/environments/environment.toml"));
+    assert!(agents.contains("update it to the correct state"));
     assert!(!agents.contains("RTK"));
     assert!(!agents.contains("rtk"));
 }

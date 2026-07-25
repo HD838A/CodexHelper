@@ -27,4 +27,7 @@ fn new_command_creates_project_next_to_current_directory() {
     assert!(project_dir.join(".gitignore").is_file());
     assert!(project_dir.join("README.md").is_file());
     assert!(project_dir.join("AGENTS.md").is_file());
+    assert!(project_dir
+        .join(".codex/environments/environment.toml")
+        .is_file());
 }
