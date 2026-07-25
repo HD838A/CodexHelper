@@ -1,7 +1,9 @@
 use std::fs;
+use std::process::Command;
 
 use codex_helper::{
-    create_project, default_target_parent, validate_project_name, CreateProjectOptions,
+    check_project_health, create_project, default_target_parent, validate_project_name,
+    CreateProjectOptions,
 };
 use tempfile::tempdir;
 
@@ -48,6 +50,8 @@ fn creates_empty_project_with_common_files_and_git_repo() {
     let created = create_project(CreateProjectOptions {
         current_dir: helper_dir.clone(),
         project_name: "PhotoTools".to_string(),
+        target_dir: None,
+        initial_commit: false,
     })
     .unwrap();
 
@@ -70,6 +74,78 @@ fn creates_empty_project_with_common_files_and_git_repo() {
 }
 
 #[test]
+fn creates_project_in_explicit_target_dir() {
+    let workspace = tempdir().unwrap();
+    let helper_dir = workspace.path().join("CodexHelper");
+    let projects_dir = workspace.path().join("Projects");
+    fs::create_dir(&helper_dir).unwrap();
+    fs::create_dir(&projects_dir).unwrap();
+
+    let created = create_project(CreateProjectOptions {
+        current_dir: helper_dir,
+        project_name: "PhotoTools".to_string(),
+        target_dir: Some(projects_dir.clone()),
+        initial_commit: false,
+    })
+    .unwrap();
+
+    assert_eq!(created.path, projects_dir.join("PhotoTools"));
+    assert!(created.path.join(".git").is_dir());
+}
+
+#[test]
+fn can_create_initial_commit() {
+    let workspace = tempdir().unwrap();
+    let helper_dir = workspace.path().join("CodexHelper");
+    fs::create_dir(&helper_dir).unwrap();
+
+    let created = create_project(CreateProjectOptions {
+        current_dir: helper_dir,
+        project_name: "PhotoTools".to_string(),
+        target_dir: None,
+        initial_commit: true,
+    })
+    .unwrap();
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&created.path)
+        .arg("log")
+        .arg("--oneline")
+        .arg("-1")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Initial commit"));
+}
+
+#[test]
+fn checks_project_health() {
+    let workspace = tempdir().unwrap();
+    let helper_dir = workspace.path().join("CodexHelper");
+    fs::create_dir(&helper_dir).unwrap();
+
+    let created = create_project(CreateProjectOptions {
+        current_dir: helper_dir,
+        project_name: "PhotoTools".to_string(),
+        target_dir: None,
+        initial_commit: true,
+    })
+    .unwrap();
+
+    let health = check_project_health(&created.path).unwrap();
+
+    assert!(health.is_ready());
+    assert!(health.is_git_repo);
+    assert!(health.has_readme);
+    assert!(health.has_gitignore);
+    assert!(health.has_agents);
+    assert!(health.has_environment);
+    assert_eq!(health.dirty_worktree, Some(false));
+}
+
+#[test]
 fn fails_when_target_directory_exists_without_modifying_it() {
     let workspace = tempdir().unwrap();
     let helper_dir = workspace.path().join("CodexHelper");
@@ -81,6 +157,8 @@ fn fails_when_target_directory_exists_without_modifying_it() {
     let result = create_project(CreateProjectOptions {
         current_dir: helper_dir,
         project_name: "PhotoTools".to_string(),
+        target_dir: None,
+        initial_commit: false,
     });
 
     assert!(result.is_err());

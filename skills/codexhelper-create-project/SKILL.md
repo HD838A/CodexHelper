@@ -20,13 +20,15 @@ Use this skill to turn a natural-language project creation request into a single
 codex-helper new <project-name>
 ```
 
-5. If the CLI is not installed but the current workspace is the CodexHelper repository, run the local binary through the Rust project instead:
+5. If the user gives an explicit destination directory, pass it with `--target-dir <path>`.
+6. If the user asks for the generated shell to be committed, pass `--initial-commit`.
+7. If the CLI is not installed but the current workspace is the CodexHelper repository, run the local binary through the Rust project instead:
 
 ```bash
 cargo run -- new <project-name>
 ```
 
-6. Report the created project path and the generated files: `.gitignore`, `README.md`, `AGENTS.md`, and `.codex/environments/environment.toml`.
+8. Report the created project path and the generated files: `.gitignore`, `README.md`, `AGENTS.md`, and `.codex/environments/environment.toml`.
 
 ## Boundaries
 

@@ -10,6 +10,8 @@ mod templates;
 pub struct CreateProjectOptions {
     pub current_dir: PathBuf,
     pub project_name: String,
+    pub target_dir: Option<PathBuf>,
+    pub initial_commit: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +26,7 @@ pub enum CodexHelperError {
     TargetAlreadyExists(PathBuf),
     Io(std::io::Error),
     GitInitFailed(String),
+    GitCommitFailed(String),
     CleanupFailed {
         original: Box<CodexHelperError>,
         cleanup: std::io::Error,
@@ -42,6 +45,7 @@ impl fmt::Display for CodexHelperError {
             }
             Self::Io(error) => write!(f, "{error}"),
             Self::GitInitFailed(message) => write!(f, "git init failed: {message}"),
+            Self::GitCommitFailed(message) => write!(f, "initial git commit failed: {message}"),
             Self::CleanupFailed { original, cleanup } => {
                 write!(
                     f,
@@ -113,6 +117,48 @@ pub fn default_target_parent(current_dir: &Path) -> Result<PathBuf> {
         .ok_or_else(|| CodexHelperError::MissingParent(current_dir.to_path_buf()))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectHealth {
+    pub path: PathBuf,
+    pub is_git_repo: bool,
+    pub has_readme: bool,
+    pub has_gitignore: bool,
+    pub has_agents: bool,
+    pub has_environment: bool,
+    pub dirty_worktree: Option<bool>,
+}
+
+impl ProjectHealth {
+    pub fn is_ready(&self) -> bool {
+        self.is_git_repo
+            && self.has_readme
+            && self.has_gitignore
+            && self.has_agents
+            && self.has_environment
+            && self.dirty_worktree == Some(false)
+    }
+}
+
+pub fn check_project_health(path: &Path) -> Result<ProjectHealth> {
+    let path = path.to_path_buf();
+    let is_git_repo = path.join(".git").is_dir();
+    let dirty_worktree = if is_git_repo {
+        Some(is_git_worktree_dirty(&path)?)
+    } else {
+        None
+    };
+
+    Ok(ProjectHealth {
+        has_readme: path.join("README.md").is_file(),
+        has_gitignore: path.join(".gitignore").is_file(),
+        has_agents: path.join("AGENTS.md").is_file(),
+        has_environment: path.join(".codex/environments/environment.toml").is_file(),
+        path,
+        is_git_repo,
+        dirty_worktree,
+    })
+}
+
 pub fn create_project(options: CreateProjectOptions) -> Result<CreatedProject> {
     create_project_with_git(options, "git")
 }
@@ -123,7 +169,10 @@ fn create_project_with_git(
 ) -> Result<CreatedProject> {
     validate_project_name(&options.project_name)?;
 
-    let parent = default_target_parent(&options.current_dir)?;
+    let parent = match &options.target_dir {
+        Some(target_dir) => target_dir.to_path_buf(),
+        None => default_target_parent(&options.current_dir)?,
+    };
     let target = parent.join(&options.project_name);
     ensure_target_inside_parent(&parent, &target)?;
 
@@ -134,6 +183,13 @@ fn create_project_with_git(
     fs::create_dir(&target)?;
     if let Err(error) = write_project_files(&target, &options.project_name)
         .and_then(|_| init_git_repo(&target, git_program))
+        .and_then(|_| {
+            if options.initial_commit {
+                create_initial_commit(&target, git_program)
+            } else {
+                Ok(())
+            }
+        })
     {
         return Err(cleanup_created_project(&target, error));
     }
@@ -208,6 +264,65 @@ fn init_git_repo(project_dir: &Path, git_program: &str) -> Result<()> {
     Err(CodexHelperError::GitInitFailed(message))
 }
 
+fn create_initial_commit(project_dir: &Path, git_program: &str) -> Result<()> {
+    let add_output = Command::new(git_program)
+        .arg("add")
+        .arg(".")
+        .current_dir(project_dir)
+        .output()?;
+
+    if !add_output.status.success() {
+        return Err(CodexHelperError::GitCommitFailed(command_message(
+            &add_output,
+        )));
+    }
+
+    let commit_output = Command::new(git_program)
+        .arg("-c")
+        .arg("user.name=CodexHelper")
+        .arg("-c")
+        .arg("user.email=codex-helper@example.invalid")
+        .arg("commit")
+        .arg("-m")
+        .arg("Initial commit")
+        .current_dir(project_dir)
+        .output()?;
+
+    if commit_output.status.success() {
+        return Ok(());
+    }
+
+    Err(CodexHelperError::GitCommitFailed(command_message(
+        &commit_output,
+    )))
+}
+
+fn is_git_worktree_dirty(project_dir: &Path) -> Result<bool> {
+    let output = Command::new("git")
+        .arg("status")
+        .arg("--porcelain")
+        .current_dir(project_dir)
+        .output()?;
+
+    if output.status.success() {
+        return Ok(!output.stdout.is_empty());
+    }
+
+    Err(CodexHelperError::Io(std::io::Error::other(
+        command_message(&output),
+    )))
+}
+
+fn command_message(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stderr.is_empty() {
+        stdout
+    } else {
+        stderr
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{create_project_with_git, CreateProjectOptions};
@@ -224,6 +339,8 @@ mod tests {
             CreateProjectOptions {
                 current_dir: helper_dir,
                 project_name: "BrokenProject".to_string(),
+                target_dir: None,
+                initial_commit: false,
             },
             "codex-helper-missing-git-binary",
         );
