@@ -94,6 +94,12 @@ pub fn validate_project_name(name: &str) -> Result<()> {
         ));
     }
 
+    if trimmed.ends_with('.') || trimmed.ends_with(' ') {
+        return Err(CodexHelperError::InvalidProjectName(
+            "name must not end with a dot or space".to_string(),
+        ));
+    }
+
     if trimmed.contains('/') || trimmed.contains('\\') {
         return Err(CodexHelperError::InvalidProjectName(
             "name must not contain path separators".to_string(),
@@ -107,7 +113,42 @@ pub fn validate_project_name(name: &str) -> Result<()> {
         ));
     }
 
+    if is_windows_reserved_name(trimmed) {
+        return Err(CodexHelperError::InvalidProjectName(
+            "name must not use a Windows reserved device name".to_string(),
+        ));
+    }
+
     Ok(())
+}
+
+fn is_windows_reserved_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name);
+    matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
 }
 
 pub fn default_target_parent(current_dir: &Path) -> Result<PathBuf> {
@@ -141,7 +182,7 @@ impl ProjectHealth {
 
 pub fn check_project_health(path: &Path) -> Result<ProjectHealth> {
     let path = path.to_path_buf();
-    let is_git_repo = path.join(".git").is_dir();
+    let is_git_repo = path.join(".git").exists();
     let dirty_worktree = if is_git_repo {
         Some(is_git_worktree_dirty(&path)?)
     } else {

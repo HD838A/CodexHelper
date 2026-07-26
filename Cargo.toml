@@ -2,6 +2,14 @@
 name = "codex-helper"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
+description = "Local CLI for creating and checking Codex-friendly project shells"
+license = "MIT"
+repository = "https://github.com/HD838A/CodexHelper"
+homepage = "https://github.com/HD838A/CodexHelper"
+readme = "README.md"
+keywords = ["cli", "scaffolding", "project", "git"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 clap = { version = "4.5.4", features = ["derive"] }

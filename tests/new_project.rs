@@ -17,6 +17,10 @@ fn rejects_invalid_project_names() {
         "nested\\demo",
         ".",
         "..",
+        "CON",
+        "aux.md",
+        "trailing.",
+        "trailing ",
     ] {
         assert!(validate_project_name(name).is_err(), "{name:?} should fail");
     }
@@ -143,6 +147,38 @@ fn checks_project_health() {
     assert!(health.has_agents);
     assert!(health.has_environment);
     assert_eq!(health.dirty_worktree, Some(false));
+}
+
+#[test]
+fn checks_git_worktree_health() {
+    let workspace = tempdir().unwrap();
+    let helper_dir = workspace.path().join("CodexHelper");
+    fs::create_dir(&helper_dir).unwrap();
+
+    let created = create_project(CreateProjectOptions {
+        current_dir: helper_dir,
+        project_name: "PhotoTools".to_string(),
+        target_dir: None,
+        initial_commit: true,
+    })
+    .unwrap();
+    let worktree_dir = workspace.path().join("PhotoTools-worktree");
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&created.path)
+        .args(["worktree", "add"])
+        .arg(&worktree_dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(worktree_dir.join(".git").is_file());
+    assert!(check_project_health(&worktree_dir).unwrap().is_ready());
 }
 
 #[test]
