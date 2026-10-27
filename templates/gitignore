@@ -1,0 +1,21 @@
+.DS_Store
+.idea/
+.vscode/
+*.log
+.env
+.env.*
+!.env.example
+tmp/
+temp/
+cache/
+.cache/
+build/
+dist/
+target/
+
+# CodexHelper management documents
+!/TODO.md
+!/README.md
+!/AGENTS.md
+!/plans/
+!/plans/**

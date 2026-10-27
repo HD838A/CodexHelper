@@ -2,8 +2,8 @@ use std::fs;
 use std::process::Command;
 
 use codex_helper::{
-    check_project_health, create_project, default_target_parent, validate_project_name,
-    CreateProjectOptions,
+    check_project_health, create_project, default_target_parent, initialize_project,
+    validate_project_name, CreateProjectOptions,
 };
 use tempfile::tempdir;
 
@@ -64,6 +64,9 @@ fn creates_empty_project_with_common_files_and_git_repo() {
     assert!(project_dir.is_dir());
     assert!(project_dir.join(".git").is_dir());
     assert!(project_dir.join(".gitignore").is_file());
+    assert!(project_dir.join("TODO.md").is_file());
+    assert!(project_dir.join("plans/README.md").is_file());
+    assert!(!project_dir.join("PLAN.md").exists());
     assert!(project_dir.join("README.md").is_file());
     assert!(project_dir.join("AGENTS.md").is_file());
     assert!(project_dir
@@ -73,8 +76,26 @@ fn creates_empty_project_with_common_files_and_git_repo() {
     let agents = fs::read_to_string(project_dir.join("AGENTS.md")).unwrap();
     assert!(agents.contains(".codex/environments/environment.toml"));
     assert!(agents.contains("update it to the correct state"));
+    assert!(agents.contains("one plan per concrete requirement"));
+    assert!(agents.contains("Read the linked requirement plan"));
+    assert!(agents.contains("Keep task status in `TODO.md`"));
     assert!(!agents.contains("RTK"));
     assert!(!agents.contains("rtk"));
+
+    let todo = fs::read_to_string(project_dir.join("TODO.md")).unwrap();
+    assert!(!todo.contains("T-001"));
+
+    let ignored = Command::new("git")
+        .arg("-C")
+        .arg(&project_dir)
+        .arg("check-ignore")
+        .args(["TODO.md", "README.md", "AGENTS.md", "plans/README.md"])
+        .output()
+        .unwrap();
+    assert!(
+        !ignored.status.success(),
+        "generated project documents must not be ignored"
+    );
 }
 
 #[test]
@@ -122,6 +143,15 @@ fn can_create_initial_commit() {
 
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("Initial commit"));
+
+    let branch = Command::new("git")
+        .arg("-C")
+        .arg(&created.path)
+        .args(["branch", "--show-current"])
+        .output()
+        .unwrap();
+    assert!(branch.status.success());
+    assert_eq!(String::from_utf8_lossy(&branch.stdout).trim(), "main");
 }
 
 #[test]
@@ -142,11 +172,122 @@ fn checks_project_health() {
 
     assert!(health.is_ready());
     assert!(health.is_git_repo);
+    assert!(health.has_todo);
+    assert!(health.has_plans_guide);
     assert!(health.has_readme);
     assert!(health.has_gitignore);
     assert!(health.has_agents);
     assert!(health.has_environment);
+    assert!(health.management_docs_not_ignored);
+    assert!(health.todo_plan_links_valid);
     assert_eq!(health.dirty_worktree, Some(false));
+}
+
+#[test]
+fn validates_todo_plan_links_and_gitignore_rules() {
+    let workspace = tempdir().unwrap();
+    let helper_dir = workspace.path().join("CodexHelper");
+    fs::create_dir(&helper_dir).unwrap();
+
+    let created = create_project(CreateProjectOptions {
+        current_dir: helper_dir,
+        project_name: "PhotoTools".to_string(),
+        target_dir: None,
+        initial_commit: false,
+    })
+    .unwrap();
+
+    fs::write(
+        created.path.join("TODO.md"),
+        "# TODO\n\n## Now\n\n- [ ] T-001 Missing plan\n",
+    )
+    .unwrap();
+    assert!(
+        !check_project_health(&created.path)
+            .unwrap()
+            .todo_plan_links_valid
+    );
+
+    fs::write(
+        created.path.join("TODO.md"),
+        "# TODO\n\n## Now\n\n- [ ] [T-001 Add import](plans/T-001-add-import.md)\n",
+    )
+    .unwrap();
+    fs::write(
+        created.path.join("plans/T-001-add-import.md"),
+        "# T-001 Add import\n",
+    )
+    .unwrap();
+    assert!(
+        check_project_health(&created.path)
+            .unwrap()
+            .todo_plan_links_valid
+    );
+
+    let mut gitignore = fs::read_to_string(created.path.join(".gitignore")).unwrap();
+    gitignore.push_str("\nTODO.md\n");
+    fs::write(created.path.join(".gitignore"), gitignore).unwrap();
+    assert!(
+        !check_project_health(&created.path)
+            .unwrap()
+            .management_docs_not_ignored
+    );
+}
+
+#[test]
+fn initializes_existing_project_without_overwriting_files() {
+    let workspace = tempdir().unwrap();
+    let project_dir = workspace.path().join("ExistingProject");
+    fs::create_dir(&project_dir).unwrap();
+    fs::write(project_dir.join("README.md"), "# Keep this README\n").unwrap();
+    fs::write(project_dir.join(".gitignore"), "*.md\n").unwrap();
+
+    let initialized = initialize_project(&project_dir).unwrap();
+
+    assert!(initialized.initialized_git);
+    assert!(initialized.updated_gitignore);
+    assert_eq!(
+        fs::read_to_string(project_dir.join("README.md")).unwrap(),
+        "# Keep this README\n"
+    );
+    assert!(project_dir.join("TODO.md").is_file());
+    assert!(project_dir.join("plans/README.md").is_file());
+    assert!(project_dir.join("AGENTS.md").is_file());
+    assert!(project_dir
+        .join(".codex/environments/environment.toml")
+        .is_file());
+    assert!(
+        check_project_health(&project_dir)
+            .unwrap()
+            .management_docs_not_ignored
+    );
+
+    let second = initialize_project(&project_dir).unwrap();
+    assert!(!second.initialized_git);
+    assert!(!second.updated_gitignore);
+    assert!(second.created_files.is_empty());
+}
+
+#[test]
+fn dirty_worktree_only_fails_when_cleanliness_is_required() {
+    let workspace = tempdir().unwrap();
+    let helper_dir = workspace.path().join("CodexHelper");
+    fs::create_dir(&helper_dir).unwrap();
+
+    let created = create_project(CreateProjectOptions {
+        current_dir: helper_dir,
+        project_name: "PhotoTools".to_string(),
+        target_dir: None,
+        initial_commit: true,
+    })
+    .unwrap();
+    fs::write(created.path.join("README.md"), "changed\n").unwrap();
+
+    let health = check_project_health(&created.path).unwrap();
+    assert!(health.is_configured());
+    assert!(health.is_ready());
+    assert!(health.meets_requirements(false));
+    assert!(!health.meets_requirements(true));
 }
 
 #[test]

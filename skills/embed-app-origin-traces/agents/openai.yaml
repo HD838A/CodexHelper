@@ -1,0 +1,4 @@
+interface:
+  display_name: "App Origin Trace Embedder"
+  short_description: "Embed offline origin traces across Swift app code"
+  default_prompt: "Use $embed-app-origin-traces to add project-specific offline origin traces to this Swift macOS app."

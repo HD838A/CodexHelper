@@ -1,7 +1,8 @@
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 mod templates;
@@ -19,10 +20,20 @@ pub struct CreatedProject {
     pub path: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitializedProject {
+    pub path: PathBuf,
+    pub created_files: Vec<PathBuf>,
+    pub initialized_git: bool,
+    pub updated_gitignore: bool,
+}
+
 #[derive(Debug)]
 pub enum CodexHelperError {
     InvalidProjectName(String),
     MissingParent(PathBuf),
+    ProjectDirectoryNotFound(PathBuf),
+    ProjectPathNotDirectory(PathBuf),
     TargetAlreadyExists(PathBuf),
     Io(std::io::Error),
     GitInitFailed(String),
@@ -39,6 +50,12 @@ impl fmt::Display for CodexHelperError {
             Self::InvalidProjectName(reason) => write!(f, "invalid project name: {reason}"),
             Self::MissingParent(path) => {
                 write!(f, "current directory has no parent: {}", path.display())
+            }
+            Self::ProjectDirectoryNotFound(path) => {
+                write!(f, "project directory does not exist: {}", path.display())
+            }
+            Self::ProjectPathNotDirectory(path) => {
+                write!(f, "project path is not a directory: {}", path.display())
             }
             Self::TargetAlreadyExists(path) => {
                 write!(f, "target directory already exists: {}", path.display())
@@ -162,21 +179,36 @@ pub fn default_target_parent(current_dir: &Path) -> Result<PathBuf> {
 pub struct ProjectHealth {
     pub path: PathBuf,
     pub is_git_repo: bool,
+    pub has_todo: bool,
+    pub has_plans_guide: bool,
     pub has_readme: bool,
     pub has_gitignore: bool,
     pub has_agents: bool,
     pub has_environment: bool,
+    pub management_docs_not_ignored: bool,
+    pub todo_plan_links_valid: bool,
     pub dirty_worktree: Option<bool>,
 }
 
 impl ProjectHealth {
-    pub fn is_ready(&self) -> bool {
+    pub fn is_configured(&self) -> bool {
         self.is_git_repo
+            && self.has_todo
+            && self.has_plans_guide
             && self.has_readme
             && self.has_gitignore
             && self.has_agents
             && self.has_environment
-            && self.dirty_worktree == Some(false)
+            && self.management_docs_not_ignored
+            && self.todo_plan_links_valid
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.is_configured()
+    }
+
+    pub fn meets_requirements(&self, require_clean: bool) -> bool {
+        self.is_configured() && (!require_clean || self.dirty_worktree == Some(false))
     }
 }
 
@@ -188,16 +220,282 @@ pub fn check_project_health(path: &Path) -> Result<ProjectHealth> {
     } else {
         None
     };
+    let management_docs_not_ignored = if is_git_repo {
+        management_documents_are_not_ignored(&path)?
+    } else {
+        false
+    };
+    let todo_plan_links_valid = validate_todo_plan_links(&path)?;
 
     Ok(ProjectHealth {
+        has_todo: path.join("TODO.md").is_file(),
+        has_plans_guide: path.join("plans/README.md").is_file(),
         has_readme: path.join("README.md").is_file(),
         has_gitignore: path.join(".gitignore").is_file(),
         has_agents: path.join("AGENTS.md").is_file(),
         has_environment: path.join(".codex/environments/environment.toml").is_file(),
+        management_docs_not_ignored,
+        todo_plan_links_valid,
         path,
         is_git_repo,
         dirty_worktree,
     })
+}
+
+pub fn initialize_project(path: &Path) -> Result<InitializedProject> {
+    if !path.exists() {
+        return Err(CodexHelperError::ProjectDirectoryNotFound(
+            path.to_path_buf(),
+        ));
+    }
+    if !path.is_dir() {
+        return Err(CodexHelperError::ProjectPathNotDirectory(
+            path.to_path_buf(),
+        ));
+    }
+
+    let path = path.canonicalize()?;
+    let initialized_git = !path.join(".git").exists();
+    if initialized_git {
+        init_git_repo(&path, "git")?;
+    }
+
+    let project_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Project");
+    let mut created_files = Vec::new();
+
+    write_if_missing(
+        &path.join("TODO.md"),
+        &templates::todo_contents(project_name),
+        &mut created_files,
+    )?;
+
+    let plans_dir = path.join("plans");
+    fs::create_dir_all(&plans_dir)?;
+    write_if_missing(
+        &plans_dir.join("README.md"),
+        &templates::plans_readme_contents(project_name),
+        &mut created_files,
+    )?;
+    write_if_missing(
+        &path.join("README.md"),
+        &templates::readme_contents(project_name),
+        &mut created_files,
+    )?;
+    write_if_missing(
+        &path.join("AGENTS.md"),
+        &templates::agents_contents(project_name),
+        &mut created_files,
+    )?;
+
+    let environment_dir = path.join(".codex/environments");
+    fs::create_dir_all(&environment_dir)?;
+    write_if_missing(
+        &environment_dir.join("environment.toml"),
+        templates::environment_contents(),
+        &mut created_files,
+    )?;
+
+    let gitignore_path = path.join(".gitignore");
+    let (gitignore_created, updated_gitignore) =
+        ensure_management_documents_not_ignored(&gitignore_path)?;
+    if gitignore_created {
+        created_files.push(gitignore_path);
+    }
+
+    Ok(InitializedProject {
+        path,
+        created_files,
+        initialized_git,
+        updated_gitignore,
+    })
+}
+
+fn write_if_missing(path: &Path, contents: &str, created_files: &mut Vec<PathBuf>) -> Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+
+    fs::write(path, contents)?;
+    created_files.push(path.to_path_buf());
+    Ok(())
+}
+
+const MANAGEMENT_DOCUMENTS: [&str; 4] = ["TODO.md", "README.md", "AGENTS.md", "plans/README.md"];
+
+const MANAGEMENT_GITIGNORE_RULES: [&str; 5] = [
+    "!/TODO.md",
+    "!/README.md",
+    "!/AGENTS.md",
+    "!/plans/",
+    "!/plans/**",
+];
+
+fn ensure_management_documents_not_ignored(path: &Path) -> Result<(bool, bool)> {
+    if !path.exists() {
+        fs::write(path, templates::gitignore_contents())?;
+        return Ok((true, true));
+    }
+
+    let contents = fs::read_to_string(path)?;
+    let existing_rules: HashSet<&str> = contents.lines().map(str::trim).collect();
+    let missing_rules: Vec<&str> = MANAGEMENT_GITIGNORE_RULES
+        .iter()
+        .copied()
+        .filter(|rule| !existing_rules.contains(rule))
+        .collect();
+
+    if missing_rules.is_empty() {
+        return Ok((false, false));
+    }
+
+    let mut updated = contents;
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str("\n# CodexHelper management documents\n");
+    for rule in missing_rules {
+        updated.push_str(rule);
+        updated.push('\n');
+    }
+    fs::write(path, updated)?;
+    Ok((false, true))
+}
+
+fn management_documents_are_not_ignored(project_dir: &Path) -> Result<bool> {
+    for document in MANAGEMENT_DOCUMENTS {
+        let output = Command::new("git")
+            .args(["check-ignore", "--quiet", "--no-index", "--", document])
+            .current_dir(project_dir)
+            .output()?;
+
+        match output.status.code() {
+            Some(0) => return Ok(false),
+            Some(1) => {}
+            _ => {
+                return Err(CodexHelperError::Io(std::io::Error::other(
+                    command_message(&output),
+                )))
+            }
+        }
+    }
+
+    Ok(true)
+}
+
+fn validate_todo_plan_links(project_dir: &Path) -> Result<bool> {
+    let todo_path = project_dir.join("TODO.md");
+    let plans_dir = project_dir.join("plans");
+    if !todo_path.is_file() || !plans_dir.join("README.md").is_file() {
+        return Ok(false);
+    }
+
+    let todo = fs::read_to_string(todo_path)?;
+    let mut task_ids = HashSet::new();
+    let mut referenced_plans = HashSet::new();
+
+    for line in todo.lines().filter(|line| is_checkbox_task(line)) {
+        let ids = task_ids_in_line(line);
+        if ids.len() != 1 {
+            return Ok(false);
+        }
+
+        let task_id = &ids[0];
+        if !task_ids.insert(task_id.clone()) {
+            return Ok(false);
+        }
+
+        let Some(plan_link) = matching_plan_link(line, task_id) else {
+            return Ok(false);
+        };
+        if !project_dir.join(&plan_link).is_file() {
+            return Ok(false);
+        }
+        referenced_plans.insert(plan_link);
+    }
+
+    for entry in fs::read_dir(plans_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let file_name = entry.file_name();
+        if file_name == "README.md"
+            || Path::new(&file_name)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                != Some("md")
+        {
+            continue;
+        }
+        let relative_path = PathBuf::from("plans").join(file_name);
+        if !referenced_plans.contains(&relative_path) {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+fn is_checkbox_task(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("- [ ]") || trimmed.starts_with("- [x]") || trimmed.starts_with("- [X]")
+}
+
+fn task_ids_in_line(line: &str) -> Vec<String> {
+    let bytes = line.as_bytes();
+    let mut ids = Vec::new();
+    let mut index = 0;
+
+    while index + 5 <= bytes.len() {
+        let candidate = &bytes[index..index + 5];
+        let previous_is_identifier = index > 0 && bytes[index - 1].is_ascii_alphanumeric();
+        let next_is_digit = index + 5 < bytes.len() && bytes[index + 5].is_ascii_digit();
+        if candidate[0] == b'T'
+            && candidate[1] == b'-'
+            && candidate[2..].iter().all(u8::is_ascii_digit)
+            && !previous_is_identifier
+            && !next_is_digit
+        {
+            let task_id = String::from_utf8_lossy(candidate).into_owned();
+            if !ids.contains(&task_id) {
+                ids.push(task_id);
+            }
+            index += 5;
+        } else {
+            index += 1;
+        }
+    }
+
+    ids
+}
+
+fn matching_plan_link(line: &str, task_id: &str) -> Option<PathBuf> {
+    let mut remainder = line;
+    while let Some(link_marker) = remainder.find("](plans/") {
+        let path_start = link_marker + 2;
+        let link_content = &remainder[path_start..];
+        let path_end = link_content.find(')')?;
+        let link = &link_content[..path_end];
+        let path = Path::new(link);
+        let valid_components = path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)));
+        let file_name = path.file_name().and_then(|name| name.to_str());
+        let valid_file_name = file_name.is_some_and(|name| {
+            name == format!("{task_id}.md")
+                || (name.starts_with(&format!("{task_id}-")) && name.ends_with(".md"))
+        });
+        if valid_components && path.parent() == Some(Path::new("plans")) && valid_file_name {
+            return Some(path.to_path_buf());
+        }
+        remainder = &link_content[path_end + 1..];
+    }
+
+    None
 }
 
 pub fn create_project(options: CreateProjectOptions) -> Result<CreatedProject> {
@@ -266,6 +564,16 @@ fn ensure_target_inside_parent(parent: &Path, target: &Path) -> Result<()> {
 
 fn write_project_files(project_dir: &Path, project_name: &str) -> Result<()> {
     fs::write(
+        project_dir.join("TODO.md"),
+        templates::todo_contents(project_name),
+    )?;
+    let plans_dir = project_dir.join("plans");
+    fs::create_dir(&plans_dir)?;
+    fs::write(
+        plans_dir.join("README.md"),
+        templates::plans_readme_contents(project_name),
+    )?;
+    fs::write(
         project_dir.join("README.md"),
         templates::readme_contents(project_name),
     )?;
@@ -290,7 +598,7 @@ fn write_project_files(project_dir: &Path, project_name: &str) -> Result<()> {
 
 fn init_git_repo(project_dir: &Path, git_program: &str) -> Result<()> {
     let output = Command::new(git_program)
-        .arg("init")
+        .args(["init", "--initial-branch=main"])
         .current_dir(project_dir)
         .output()?;
 
@@ -318,14 +626,17 @@ fn create_initial_commit(project_dir: &Path, git_program: &str) -> Result<()> {
         )));
     }
 
-    let commit_output = Command::new(git_program)
-        .arg("-c")
-        .arg("user.name=CodexHelper")
-        .arg("-c")
-        .arg("user.email=codex-helper@example.invalid")
-        .arg("commit")
-        .arg("-m")
-        .arg("Initial commit")
+    let has_user_name = git_config_value(project_dir, git_program, "user.name").is_some();
+    let has_user_email = git_config_value(project_dir, git_program, "user.email").is_some();
+    let mut commit_command = Command::new(git_program);
+    if !has_user_name {
+        commit_command.args(["-c", "user.name=CodexHelper"]);
+    }
+    if !has_user_email {
+        commit_command.args(["-c", "user.email=codex-helper@example.invalid"]);
+    }
+    let commit_output = commit_command
+        .args(["commit", "-m", "Initial commit"])
         .current_dir(project_dir)
         .output()?;
 
@@ -336,6 +647,20 @@ fn create_initial_commit(project_dir: &Path, git_program: &str) -> Result<()> {
     Err(CodexHelperError::GitCommitFailed(command_message(
         &commit_output,
     )))
+}
+
+fn git_config_value(project_dir: &Path, git_program: &str, key: &str) -> Option<String> {
+    let output = Command::new(git_program)
+        .args(["config", "--get", key])
+        .current_dir(project_dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
 }
 
 fn is_git_worktree_dirty(project_dir: &Path) -> Result<bool> {
